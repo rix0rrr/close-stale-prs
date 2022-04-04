@@ -1,0 +1,25 @@
+name: 'reprioritize-issues'
+on: 
+  issues:
+    types: 
+      - edited
+      - opened
+
+jobs:
+  reprioritization-manager:
+    permissions: 
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: kaizen3031593/issue-reprioritization-manager@main
+        id: reprioritization-manager
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          original-label: p2
+          new-label: p1
+          reprioritization-threshold: 1
+      - uses: kaizen3031593/pr-triage-manager@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          on-pulls: ${{ steps.reprioritization-manager.outputs.linked-pulls }}
