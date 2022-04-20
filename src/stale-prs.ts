@@ -150,7 +150,6 @@ export class StalePrFinder {
       }
       case 'close': {
         this.metrics.closed++;
-        throw new Error('Did not expect a CLOSE yet');
         const message = this.props.closeMessage ?? 'No more work is being done on this PR. It will now be closed.';
         await this.client.rest.issues.createComment({
           ...this.repo,
