@@ -11,6 +11,7 @@ async function run() {
   const warnMessage: string = core.getInput('warn-message');
   const closeMessage: string = core.getInput('close-message');
   const closeLabel: string = core.getInput('close-label');
+  const dryRun: boolean = core.getInput('dry-run') !== '';
 
   const finder = new StalePrFinder(token, {
     owner: github.context.repo.owner,
@@ -22,6 +23,7 @@ async function run() {
     warnMessage: warnMessage ? warnMessage : undefined,
     closeMessage: closeMessage ? closeMessage : undefined,
     closeLabel: closeLabel ? closeLabel : undefined,
+    dryRun,
   });
 
   await finder.findAll();

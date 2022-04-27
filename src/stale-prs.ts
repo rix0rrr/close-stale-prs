@@ -1,17 +1,28 @@
 import * as github from '@actions/github';
 
-const STALE_WARNING_MARKER = '<!--STALE PR-->';
+export type Marker = 'STALE PR' | 'MERGE CONFLICTS';
 
 export interface StalePrFinderProps {
   readonly owner: string;
   readonly repo: string;
   readonly staleDays: number;
   readonly responseDays: number;
+
+  /**
+   * After how many days to warn for merge conflicts
+   *
+   * 0 disables
+   *
+   * @default 3
+   */
+  readonly mergeConflictWarningDays?: number;
+  readonly mergeConflictWarning?: string;
   readonly importantChecksRegex?: RegExp;
   readonly skipLabels?: string[];
   readonly warnMessage?: string;
   readonly closeMessage?: string;
   readonly closeLabel?: string;
+  readonly dryRun?: boolean;
 }
 
 export type Action = 'nothing' | 'warn' | 'close';
@@ -22,6 +33,7 @@ export interface Metrics {
   stalePrs: number;
   staleDueToChangesRequested: number;
   staleDueToBuildFailing: number;
+  staleDueToMergeConflicts: number;
   warned: number;
   closed: number;
 };
@@ -32,6 +44,7 @@ export class StalePrFinder {
     stalePrs: 0,
     staleDueToChangesRequested: 0,
     staleDueToBuildFailing: 0,
+    staleDueToMergeConflicts: 0,
     warned: 0,
     closed: 0,
     skipped: 0,
@@ -39,10 +52,17 @@ export class StalePrFinder {
 
   private readonly client: ReturnType<typeof github.getOctokit>;
   private readonly repo: { owner: string; repo: string };
+  private readonly mergeConflictWarningDays: number;
 
   constructor(token: string, private readonly props: StalePrFinderProps) {
     this.client = github.getOctokit(token);
     this.repo = { owner: props.owner, repo: props.repo };
+
+    this.mergeConflictWarningDays = props.mergeConflictWarningDays ?? 3;
+
+    if (this.props.dryRun) {
+      console.log('Dry run ON');
+    }
   }
 
   public async findAll() {
@@ -74,6 +94,7 @@ export class StalePrFinder {
       const failingChecks = await this.failingChecks(pull.head.sha);
       const changesRequested = await this.isChangesRequested(pull.number);
       const lastCommit = await this.lastCommit(pull.number);
+      const hasMergeConflicts = (await this.client.rest.pulls.get({ ...this.repo, pull_number: pull.number })).data.mergeable_state === 'dirty';
 
       console.log(`        Build failures:      ${summarizeChecks(failingChecks)}`);
       let buildFailTime = maxTime(failingChecks);
@@ -87,11 +108,13 @@ export class StalePrFinder {
 
       console.log('        Changes requested:  ', changesRequested?.when?.toISOString() ?? '(no)');
       console.log(`        Last commit:         ${lastCommit?.toISOString()}`);
+      console.log(`        Merge conflicts:     ${hasMergeConflicts}`);
 
       // A PR has a problem if:
       // - It has been in CHANGES REQUESTED for a given period and there have not been commits since
       //   (If there have been new commits it's time for a re-review first)
       // - It has been in BUILD FAILING for a given period; or
+      // - It has been in MERGE CONFLICTS for a given period.
       let stale: Stale | undefined;
 
       if (changesRequested && lastCommit
@@ -108,9 +131,21 @@ export class StalePrFinder {
           reason: 'BUILD FAILING',
           since: buildFailTime,
         };
+      } else if (hasMergeConflicts) {
+        // Give an early warning of merge conflicts
+
+        if (lastCommit && this.stale(lastCommit)) {
+          this.metrics.staleDueToMergeConflicts++;
+          stale = {
+            reason: 'MERGE CONFLICTS',
+            since: lastCommit,
+          };
+        } else if (lastCommit && this.mergeConflictWarningDays && this.olderThanDays(lastCommit, this.mergeConflictWarningDays)) {
+          await this.addMergeConflictWarning(pull.number);
+        }
       }
 
-      const warnedAt = await this.mostRecentWarning(pull.number);
+      const warnings = await this.mostRecentWarnings(pull.number);
 
       console.log('        Stale:              ', stale ? `yes (${stale.reason})` : 'no');
 
@@ -119,12 +154,13 @@ export class StalePrFinder {
         this.metrics.stalePrs++;
 
         console.log('        Stale since:        ', stale.since.toISOString());
-        console.log('        Warned at:          ', warnedAt?.toISOString() ?? '(never)');
+        console.log('        Warnings:           ', Object.fromEntries(warnings)); // Prints nicer
 
-        if (!warnedAt || warnedAt < stale.since) {
+        const warning = warnings.get('STALE PR');
+        if (!warning || warning < stale.since) {
           // Beginning a new staleness period
           action = 'warn';
-        } else if (warnedAt && this.outOfGracePeriod(warnedAt)) {
+        } else if (warnings && this.outOfGracePeriod(warning)) {
           // Time to close
           action = 'close';
         }
@@ -141,46 +177,81 @@ export class StalePrFinder {
       case 'warn': {
         this.metrics.warned++;
         const message = this.props.warnMessage?.replace(/STATE/, stale?.reason ?? '') ?? `This PR has been in ${stale?.reason} for ${this.props.staleDays} days, and looks abandoned. It will be closed in ${this.props.responseDays} days if no further commits are pushed to it.`;
-        await this.client.rest.issues.createComment({
-          ...this.repo,
-          issue_number: pull_number,
-          body: `${STALE_WARNING_MARKER}\n${message}`,
-        });
+
+        await this.addComment(pull_number, `${marker('STALE PR')}\n${message}`);
         return;
       }
       case 'close': {
         this.metrics.closed++;
         const message = this.props.closeMessage ?? 'No more work is being done on this PR. It will now be closed.';
-        await this.client.rest.issues.createComment({
-          ...this.repo,
-          issue_number: pull_number,
-          body: message,
-        });
+
+        await this.addComment(pull_number, message);
+
         if (this.props.closeLabel) {
-          await this.client.rest.issues.addLabels({
-            ...this.repo,
-            issue_number: pull_number,
-            labels: [this.props.closeLabel ?? ''],
-          });
+          await this.addLabels(pull_number, [this.props.closeLabel ?? '']);
         }
-        await this.client.rest.issues.update({
-          ...this.repo,
-          issue_number: pull_number,
-          state: 'closed',
-        });
+
+        await this.closeIssue(pull_number);
         return;
       }
     }
   }
 
+  private async addMergeConflictWarning(pull_number: number) {
+    const message = this.props.mergeConflictWarning ??
+      'This PR cannot be merged because it has conflicts. Please resolve them. The PR will be considered stale and closed if it remains in an unmergeable state.';
+    await this.addComment(pull_number, message);
+  }
+
+  private async addComment(issue_number: number, body: string) {
+    if (this.props.dryRun) {
+      console.log(`${issue_number}: COMMENT ${body}`);
+      return;
+    }
+    await this.client.rest.issues.createComment({
+      ...this.repo,
+      issue_number,
+      body,
+    });
+  }
+
+  private async addLabels(issue_number: number, labels: string[]) {
+    if (this.props.dryRun) {
+      console.log(`${issue_number}: ADD LABEL ${labels}`);
+      return;
+    }
+
+    await this.client.rest.issues.addLabels({
+      ...this.repo,
+      issue_number,
+      labels,
+    });
+  }
+
+  private async closeIssue(issue_number: number) {
+    if (this.props.dryRun) {
+      console.log(`${issue_number}: CLOSE`);
+      return;
+    }
+
+    await this.client.rest.issues.update({
+      ...this.repo,
+      issue_number,
+      state: 'closed',
+    });
+  }
+
   private stale(t: Date) {
-    const staleMs = this.props.staleDays * 24 * 3600 * 1000;
-    return t.getTime() + staleMs < Date.now();
+    return this.olderThanDays(t, this.props.staleDays);
+  }
+
+  private olderThanDays(t: Date, days: number) {
+    const ms = days * 24 * 3600 * 1000;
+    return t.getTime() + ms < Date.now();
   }
 
   private outOfGracePeriod(t: Date) {
-    const graceMs = this.props.responseDays * 24 * 3600 * 1000;
-    return t.getTime() + graceMs < Date.now();
+    return this.olderThanDays(t, this.props.responseDays);
   }
 
   private async failingChecks(ref: string): Promise<Record<string, FailedCheck>> {
@@ -239,20 +310,24 @@ export class StalePrFinder {
   /**
    * List the comments and find the last time we marked this PR as stale.
    */
-  private async mostRecentWarning(pull_number: number): Promise<Date | undefined> {
+  private async mostRecentWarnings(pull_number: number): Promise<Map<Marker, Date>> {
     const comments = await this.client.paginate(this.client.rest.issues.listComments, {
       ...this.repo,
       issue_number: pull_number,
     });
     comments.reverse();
 
+    const ret = new Map<Marker, Date>();
+
     for (const comment of comments) {
-      if (comment.body?.includes(STALE_WARNING_MARKER)) {
-        return new Date(comment.created_at);
+      for (const m of ['STALE PR', 'MERGE CONFLICTS'] as Marker[]) {
+        if (comment.body?.includes(marker(m)) && !ret.has(m)) {
+          ret.set(m, new Date(comment.created_at));
+        }
       }
     }
 
-    return undefined;
+    return ret;
   }
 }
 
@@ -298,3 +373,8 @@ function summarizeChecks(xs: Record<string, FailedCheck>): string {
 }
 
 type IfString<A> = A extends string ? A : never;
+
+
+function marker(m: Marker) {
+  return `<!--${m}-->`;
+}

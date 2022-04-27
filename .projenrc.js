@@ -38,6 +38,10 @@ const project = new actions.GitHubActionTypeScriptProject({
         description: 'Label to add if the PR is finally closed',
         required: false,
       },
+      'dry-run': {
+        description: 'If this is set, do not perform any actions',
+        required: false,
+      },
     },
     outputs: {
     },
