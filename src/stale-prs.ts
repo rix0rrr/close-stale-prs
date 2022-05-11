@@ -92,9 +92,12 @@ export class StalePrFinder {
       }
 
       const failingChecks = await this.failingChecks(pull.head.sha);
-      const changesRequested = await this.isChangesRequested(pull.number);
+      const reviewState = await this.reviewState(pull.number);
       const lastCommit = await this.lastCommit(pull.number);
       const hasMergeConflicts = (await this.client.rest.pulls.get({ ...this.repo, pull_number: pull.number })).data.mergeable_state === 'dirty';
+
+      const changesRequested = reviewState?.state === 'changed_requested' ? reviewState : undefined;
+      const approved = reviewState?.state === 'approved' ? reviewState : undefined;
 
       console.log(`        Build failures:      ${summarizeChecks(failingChecks)}`);
       let buildFailTime = maxTime(failingChecks);
@@ -117,13 +120,13 @@ export class StalePrFinder {
       // - It has been in MERGE CONFLICTS for a given period.
       let stale: Stale | undefined;
 
-      if (changesRequested && lastCommit
-        && lastCommit < changesRequested.when
-        && this.stale(changesRequested.when)) {
+      if (reviewState && lastCommit
+        && lastCommit < reviewState.when
+        && this.stale(reviewState.when)) {
         this.metrics.staleDueToChangesRequested++;
         stale = {
           reason: 'CHANGES REQUESTED',
-          since: changesRequested.when,
+          since: reviewState.when,
         };
       } else if (buildFailTime && this.stale(buildFailTime)) {
         this.metrics.staleDueToBuildFailing++;
@@ -131,8 +134,11 @@ export class StalePrFinder {
           reason: 'BUILD FAILING',
           since: buildFailTime,
         };
-      } else if (hasMergeConflicts) {
-        // Give an early warning of merge conflicts
+      } else if (approved && hasMergeConflicts) {
+        // Give an early warning of merge conflicts. Merge conflicts are only
+        // checked if the PR is approved. Otherwise, merge conflicts may be
+        // introduced by main moving on, and the PR will be closed before we
+        // even had a chance to look at it.
 
         if (lastCommit && this.stale(lastCommit)) {
           this.metrics.staleDueToMergeConflicts++;
@@ -277,19 +283,30 @@ export class StalePrFinder {
   /**
    * Return the most recent ChangesRequested info, if applicable
    */
-  private async isChangesRequested(pull_number: number): Promise<ChangesRequested | undefined> {
-    const reviews = await this.client.rest.pulls.listReviews({ ...this.repo, pull_number });
-    const cr = reviews.data.filter(r => r.state === 'CHANGES_REQUESTED');
-    // Sort descending
-    cr.sort((a, b) => -(a.submitted_at ?? '').localeCompare(b.submitted_at ?? ''));
+  private async reviewState(pull_number: number): Promise<ReviewState | undefined> {
+    const reviews = (await this.client.paginate(this.client.rest.pulls.listReviews, { ...this.repo, pull_number }));
+    // Reviews by team members, sorted descending
+    const memberReviews = reviews.filter(r => r.author_association === 'MEMBER');
+    memberReviews.sort((a, b) => -(a.submitted_at ?? '').localeCompare(b.submitted_at ?? ''));
 
-    if (cr.length === 0 || !cr[0].submitted_at) {
-      return undefined;
+    const cr = memberReviews.filter(r => r.state === 'CHANGES_REQUESTED');
+    const approved = memberReviews.filter(r => r.state === 'APPROVED');
+
+    if (cr.length > 0 && cr[0].submitted_at) {
+      return {
+        state: 'changed_requested',
+        when: new Date(cr[0].submitted_at),
+      };
     }
 
-    return {
-      when: new Date(cr[0].submitted_at),
-    };
+    if (approved.length > 0 && approved[0].submitted_at) {
+      return {
+        state: 'approved',
+        when: new Date(approved[0].submitted_at),
+      };
+    }
+
+    return undefined;
   }
 
   private async lastCommit(pull_number: number): Promise<Date | undefined> {
@@ -331,7 +348,9 @@ export class StalePrFinder {
   }
 }
 
-interface ChangesRequested {
+interface ReviewState {
+  readonly state: 'approved' | 'changed_requested';
+
   /**
    * Example value: '2022-04-08T07:53:26Z'
    */
