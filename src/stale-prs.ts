@@ -289,6 +289,8 @@ export class StalePrFinder {
     const memberReviews = reviews.filter(r => r.author_association === 'MEMBER');
     memberReviews.sort((a, b) => -(a.submitted_at ?? '').localeCompare(b.submitted_at ?? ''));
 
+    console.log(reviews);
+
     const cr = memberReviews.filter(r => r.state === 'CHANGES_REQUESTED');
     const approved = memberReviews.filter(r => r.state === 'APPROVED');
 
