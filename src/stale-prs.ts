@@ -97,7 +97,6 @@ export class StalePrFinder {
       const hasMergeConflicts = (await this.client.rest.pulls.get({ ...this.repo, pull_number: pull.number })).data.mergeable_state === 'dirty';
 
       const changesRequested = reviewState?.state === 'changed_requested' ? reviewState : undefined;
-      const approved = reviewState?.state === 'approved' ? reviewState : undefined;
 
       console.log(`        Build failures:      ${summarizeChecks(failingChecks)}`);
       let buildFailTime = maxTime(failingChecks);
@@ -115,13 +114,11 @@ export class StalePrFinder {
 
       // A PR has a problem if:
       // - It has been in CHANGES REQUESTED for a given period and there have not been commits since
-      //   (If there have been new commits it's time for a re-review first)
       // - It has been in BUILD FAILING for a given period; or
       // - It has been in MERGE CONFLICTS for a given period.
       let stale: Stale | undefined;
 
       if (reviewState && lastCommit
-        && lastCommit < reviewState.when
         && this.stale(reviewState.when)) {
         this.metrics.staleDueToChangesRequested++;
         stale = {
@@ -134,12 +131,7 @@ export class StalePrFinder {
           reason: 'BUILD FAILING',
           since: buildFailTime,
         };
-      } else if (approved && hasMergeConflicts) {
-        // Give an early warning of merge conflicts. Merge conflicts are only
-        // checked if the PR is approved. Otherwise, merge conflicts may be
-        // introduced by main moving on, and the PR will be closed before we
-        // even had a chance to look at it.
-
+      } else if (hasMergeConflicts) {
         if (lastCommit && this.stale(lastCommit)) {
           this.metrics.staleDueToMergeConflicts++;
           stale = {
