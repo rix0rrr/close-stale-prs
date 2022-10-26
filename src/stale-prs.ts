@@ -96,7 +96,7 @@ export class StalePrFinder {
       const lastCommit = await this.lastCommit(pull.number);
       const hasMergeConflicts = (await this.client.rest.pulls.get({ ...this.repo, pull_number: pull.number })).data.mergeable_state === 'dirty';
 
-      const changesRequested = reviewState?.state === 'changed_requested' ? reviewState : undefined;
+      const changesRequested = reviewState?.state === 'changes_requested' ? reviewState : undefined;
 
       console.log(`        Build failures:      ${summarizeChecks(failingChecks)}`);
       let buildFailTime = maxTime(failingChecks);
@@ -278,23 +278,25 @@ export class StalePrFinder {
   private async reviewState(pull_number: number): Promise<ReviewState | undefined> {
     const reviews = (await this.client.paginate(this.client.rest.pulls.listReviews, { ...this.repo, pull_number }));
     // Reviews by team members, sorted descending
-    const memberReviews = reviews.filter(r => r.author_association === 'MEMBER');
-    memberReviews.sort((a, b) => -(a.submitted_at ?? '').localeCompare(b.submitted_at ?? ''));
+    // Filtering out instances where submitted_at is empty
+    const memberReviews = reviews.filter(r => r.author_association === 'MEMBER').filter(r => r.submitted_at);
+    memberReviews.sort((a, b) => (a.submitted_at!).localeCompare(b.submitted_at!));
 
     const cr = memberReviews.filter(r => r.state === 'CHANGES_REQUESTED');
     const approved = memberReviews.filter(r => r.state === 'APPROVED');
 
-    if (cr.length > 0 && cr[0].submitted_at) {
+    // Get the oldest PR with changes requested so that a new review with additional changes requested won't reset the clock
+    if (cr.length > 0) {
       return {
-        state: 'changed_requested',
-        when: new Date(cr[0].submitted_at),
+        state: 'changes_requested',
+        when: new Date(cr.pop()!.submitted_at!),
       };
     }
 
-    if (approved.length > 0 && approved[0].submitted_at) {
+    if (approved.length > 0) {
       return {
         state: 'approved',
-        when: new Date(approved[0].submitted_at),
+        when: new Date(approved[0].submitted_at!),
       };
     }
 
@@ -341,7 +343,7 @@ export class StalePrFinder {
 }
 
 interface ReviewState {
-  readonly state: 'approved' | 'changed_requested';
+  readonly state: 'approved' | 'changes_requested';
 
   /**
    * Example value: '2022-04-08T07:53:26Z'
