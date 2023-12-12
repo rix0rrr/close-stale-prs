@@ -154,8 +154,10 @@ export class StalePrFinder {
         console.log('        Stale since:        ', stale.since.toISOString());
         console.log('        Warnings:           ', Object.fromEntries(warnings)); // Prints nicer
 
+        const memberReviewed = await this.memberReviewed(pull.number);
+
         const warning = warnings.get('STALE PR');
-        if (!warning || warning < stale.since) {
+        if (!warning || warning < stale.since || !memberReviewed) {
           // Beginning a new staleness period
           action = 'warn';
         } else if (warnings && this.outOfGracePeriod(warning)) {
@@ -339,6 +341,20 @@ export class StalePrFinder {
     }
 
     return ret;
+  }
+
+  /**
+   * Returns true if the PR has been reviewed or commented on by a core member.
+   */
+  private async memberReviewed(pull_number: number): Promise<Boolean> {
+    // Get the list of reviews for the PR
+    const reviews = (await this.client.paginate(this.client.rest.pulls.listReviews, { ...this.repo, pull_number }));
+
+    // Reviews by team members
+    // Filtering out instances where submitted_at is empty
+    const memberReviews = reviews.filter(r => r.author_association === 'MEMBER').filter(r => r.submitted_at);
+
+    return memberReviews.length > 0;
   }
 }
 
