@@ -154,8 +154,10 @@ export class StalePrFinder {
         console.log('        Stale since:        ', stale.since.toISOString());
         console.log('        Warnings:           ', Object.fromEntries(warnings)); // Prints nicer
 
+        const memberReviewed = await this.memberReviewed(pull.number);
+
         const warning = warnings.get('STALE PR');
-        if (!warning || warning < stale.since) {
+        if (!warning || warning < stale.since || !memberReviewed) {
           // Beginning a new staleness period
           action = 'warn';
         } else if (warnings && this.outOfGracePeriod(warning)) {
@@ -279,11 +281,11 @@ export class StalePrFinder {
     const reviews = (await this.client.paginate(this.client.rest.pulls.listReviews, { ...this.repo, pull_number }));
     // Reviews by team members, sorted descending
     // Filtering out instances where submitted_at is empty
-    const memberReviews = reviews.filter(r => r.author_association === 'MEMBER').filter(r => r.submitted_at);
-    memberReviews.sort((a, b) => (a.submitted_at!).localeCompare(b.submitted_at!));
+    const memberReviews = reviews.filter((r: { author_association: string; }) => r.author_association === 'MEMBER').filter((r: { submitted_at: any; }) => r.submitted_at);
+    memberReviews.sort((a: { submitted_at: any; }, b: { submitted_at: any; }) => (a.submitted_at!).localeCompare(b.submitted_at!));
 
-    const cr = memberReviews.filter(r => r.state === 'CHANGES_REQUESTED');
-    const approved = memberReviews.filter(r => r.state === 'APPROVED');
+    const cr = memberReviews.filter((r: { state: string; }) => r.state === 'CHANGES_REQUESTED');
+    const approved = memberReviews.filter((r: { state: string; }) => r.state === 'APPROVED');
 
     // Get the oldest PR with changes requested so that a new review with additional changes requested won't reset the clock
     if (cr.length > 0) {
@@ -305,7 +307,7 @@ export class StalePrFinder {
 
   private async lastCommit(pull_number: number): Promise<Date | undefined> {
     const commits = await this.client.paginate(this.client.rest.pulls.listCommits, { ...this.repo, pull_number });
-    const commitTimes = commits.map(c => c.commit.committer?.date ?? '').filter(c => c);
+    const commitTimes = commits.map((c: { commit: { committer: { date: any; }; }; }) => c.commit.committer?.date ?? '').filter((c: any) => c);
     const t = commitTimes[commitTimes.length - 1];
     return t ? new Date(t) : undefined;
   }
@@ -339,6 +341,28 @@ export class StalePrFinder {
     }
 
     return ret;
+  }
+
+  /**
+   * Returns true if the PR has been reviewed or commented on by a core member.
+   */
+  private async memberReviewed(pull_number: number): Promise<Boolean> {
+    const reviews = (await this.client.paginate(this.client.rest.pulls.listReviews, { ...this.repo, pull_number }));
+
+    const comments = await this.client.paginate(this.client.rest.issues.listComments, {
+      ...this.repo,
+      issue_number: pull_number,
+    });
+
+    // Reviews by team members
+    // Filtering out instances where submitted_at is empty
+    const memberReviews = reviews.filter((r: { author_association: string; }) => r.author_association === 'MEMBER').filter((r: { submitted_at: any; }) => r.submitted_at);
+
+    // Comments by team members
+    // Filtering out instances where submitted_at is empty
+    const memberComments = comments.filter((r: { author_association: string; }) => r.author_association === 'MEMBER').filter((r: { submitted_at: any; }) => r.submitted_at);
+
+    return memberComments.length > 0 || memberReviews.length > 0;
   }
 }
 
