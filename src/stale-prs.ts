@@ -347,22 +347,24 @@ export class StalePrFinder {
    * Returns true if the PR has been reviewed or commented on by a core member.
    */
   private async memberReviewed(pull_number: number): Promise<Boolean> {
-    const reviews = (await this.client.paginate(this.client.rest.pulls.listReviews, { ...this.repo, pull_number }));
-
-    const comments = await this.client.paginate(this.client.rest.issues.listComments, {
-      ...this.repo,
-      issue_number: pull_number,
-    });
-
-    // Reviews by team members
-    // Filtering out instances where submitted_at is empty
-    const memberReviews = reviews.filter(r => r.author_association === 'MEMBER').filter(r => r.submitted_at);
-
+    
+    const comments = (await this.client.paginate(this.client.rest.issues.listComments, { ...this.repo, issue_number: pull_number, }));
+    
     // Comments by team members
     // Filtering out instances where submitted_at is empty
     const memberComments = comments.filter(r => r.author_association === 'MEMBER').filter(r => r.submitted_at);
 
-    return memberComments.length > 0 || memberReviews.length > 0;
+    if (!(memberComments.length > 0)) {
+      const reviews = (await this.client.paginate(this.client.rest.pulls.listReviews, { ...this.repo, pull_number, }));
+
+      // Reviews by team members
+      // Filtering out instances where submitted_at is empty
+      const memberReviews = reviews.filter(r => r.author_association === 'MEMBER').filter(r => r.submitted_at);
+
+      return memberReviews > 0;
+    }
+
+    return true;
   }
 }
 
